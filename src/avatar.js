@@ -39,18 +39,41 @@ function captureRest(bones) {
 }
 
 function applyAthleticMorphs(root) {
+  // Keep the base visually athletic and intentionally neutral/mannequin-like.
+  // We are validating kinematics first; realistic skin/face detail just makes
+  // rigging errors harder to read and much more uncanny.
   const desired = {
-    bodyMasculine: 0.62,
-    bodyMuscular: 0.56,
-    chestPectorals: 0.35,
-    armsMuscular: 0.42,
-    thighsMuscular: 0.44,
-    calvesMuscular: 0.32,
-    gluteusBigger: 0.20,
-    bellyToned: 0.25,
+    bodyMasculine: 1.0,
+    bodyMuscular: 0.72,
+    chestPectorals: 0.62,
+    bustSmaller: 0.90,
+    bellyToned: 0.50,
+    armsMuscular: 0.58,
+    thighsMuscular: 0.58,
+    calvesMuscular: 0.46,
+    shouldersWider: 0.18,
+    hipsNarrower: 0.16,
+    gluteusBigger: 0.08,
   };
+  const neutralMaterial = new THREE.MeshStandardMaterial({
+    color: 0x566474,
+    roughness: 0.76,
+    metalness: 0.0,
+  });
+
   root.traverse((node) => {
-    if (!node.isMesh || !node.morphTargetDictionary || !node.morphTargetInfluences) return;
+    if (!node.isMesh) return;
+
+    const n = String(node.name || '').toLowerCase();
+    // The parametric asset includes separate eyes/teeth/tongue meshes. They
+    // are irrelevant to biomechanics and were a big part of the uncanny look.
+    if (/eye|teeth|tongue/.test(n)) {
+      node.visible = false;
+      return;
+    }
+
+    node.material = neutralMaterial;
+    if (!node.morphTargetDictionary || !node.morphTargetInfluences) return;
     for (const [name, weight] of Object.entries(desired)) {
       const idx = node.morphTargetDictionary[name];
       if (idx !== undefined) node.morphTargetInfluences[idx] = weight;
@@ -88,26 +111,47 @@ function restoreRest(bones, rest) {
 function setLateralOffset(rest, bones, name, targetHalfWidth) {
   const bone = bones.get(name);
   const src = rest.get(name)?.position;
-  if (!bone || !src) return;
-  const p = src.clone();
-  const sign = Math.sign(p.x || (name.startsWith('Left') ? -1 : 1));
-  p.x = sign * targetHalfWidth;
-  bone.position.copy(p);
+  if (!bone || !src || !bone.parent) return;
+
+  // Bone offsets are authored in each parent's local frame, where local X is
+  // not guaranteed to mean body-left/right. Convert the rest offset into the
+  // world/armature frame, edit only the lateral component, then convert back.
+  bone.parent.updateWorldMatrix(true, false);
+  const parentQ = bone.parent.getWorldQuaternion(new THREE.Quaternion());
+  const worldOffset = src.clone().applyQuaternion(parentQ);
+  const fallbackSign = name.startsWith('Left') ? -1 : 1;
+  const sign = Math.sign(worldOffset.x) || fallbackSign;
+  worldOffset.x = sign * targetHalfWidth;
+  bone.position.copy(worldOffset.applyQuaternion(parentQ.clone().invert()));
 }
 
 function aimBoneAtWorld(bone, child, targetWorld) {
   if (!bone || !child) return;
   bone.updateWorldMatrix(true, false);
   child.updateWorldMatrix(true, false);
+
   const parentQuat = new THREE.Quaternion();
-  if (bone.parent) bone.parent.getWorldQuaternion(parentQuat); else parentQuat.identity();
-  const invParent = parentQuat.clone().invert();
+  if (bone.parent) bone.parent.getWorldQuaternion(parentQuat);
+  else parentQuat.identity();
+
   const boneWorld = bone.getWorldPosition(new THREE.Vector3());
-  const desiredWorld = targetWorld.clone().sub(boneWorld).normalize();
-  const desiredParent = desiredWorld.applyQuaternion(invParent).normalize();
-  const childLocalDir = child.position.clone().normalize();
-  if (childLocalDir.lengthSq() < 1e-9) return;
-  bone.quaternion.setFromUnitVectors(childLocalDir, desiredParent);
+  const desiredWorld = targetWorld.clone().sub(boneWorld);
+  if (desiredWorld.lengthSq() < 1e-10) return;
+  desiredWorld.normalize();
+
+  const desiredParent = desiredWorld.applyQuaternion(parentQuat.clone().invert()).normalize();
+  const childLocalDir = child.position.clone();
+  if (childLocalDir.lengthSq() < 1e-10) return;
+  childLocalDir.normalize();
+
+  // Critical fix: preserve the authored bind/rest orientation. The previous
+  // implementation treated the child's local offset as though the bone's rest
+  // quaternion were identity, which twisted limbs across the body and pulled
+  // the hands into the face.
+  const restQ = bone.quaternion.clone();
+  const restAxisInParent = childLocalDir.clone().applyQuaternion(restQ).normalize();
+  const delta = new THREE.Quaternion().setFromUnitVectors(restAxisInParent, desiredParent);
+  bone.quaternion.copy(delta.multiply(restQ));
   bone.updateWorldMatrix(true, true);
 }
 
@@ -243,12 +287,14 @@ export class AvatarRig {
       chain.push(['LeftArm','LeftForeArm', j.leftElbow], ['LeftForeArm','LeftHand', j.leftHand]);
       chain.push(['RightArm','RightForeArm', j.rightElbow], ['RightForeArm','RightHand', j.rightHand]);
     } else {
-      // Squats: arms simply follow the upper torso rather than pretending to model a specific rack grip yet.
-      const forward = j.shoulderCenter.clone().sub(j.hipCenter).normalize();
-      const lHand = j.leftShoulder.clone().add(new THREE.Vector3(-0.10, -0.10, 0.12)).addScaledVector(forward, 0.10);
-      const rHand = j.rightShoulder.clone().add(new THREE.Vector3(0.10, -0.10, 0.12)).addScaledVector(forward, 0.10);
-      const lElbow = j.leftShoulder.clone().lerp(lHand, 0.48).add(new THREE.Vector3(-0.07, -0.05, 0));
-      const rElbow = j.rightShoulder.clone().lerp(rHand, 0.48).add(new THREE.Vector3(0.07, -0.05, 0));
+      // Squat rack grip: hands actually sit on the bar instead of floating in
+      // front of the face. This is still a generic symmetric rack grip; a user
+      // grip-width control can come after the base pose is visually validated.
+      const gripWidth = Math.max(0.72, (this.lastMeasurements?.shoulderWidth || 0.46) * 1.65);
+      const lHand = pose.bar.clone().add(new THREE.Vector3(-gripWidth / 2, 0, 0));
+      const rHand = pose.bar.clone().add(new THREE.Vector3( gripWidth / 2, 0, 0));
+      const lElbow = j.leftShoulder.clone().lerp(lHand, 0.58).add(new THREE.Vector3(-0.06, -0.10, 0.08));
+      const rElbow = j.rightShoulder.clone().lerp(rHand, 0.58).add(new THREE.Vector3( 0.06, -0.10, 0.08));
       chain.push(['LeftArm','LeftForeArm', lElbow], ['LeftForeArm','LeftHand', lHand]);
       chain.push(['RightArm','RightForeArm', rElbow], ['RightForeArm','RightHand', rHand]);
     }
