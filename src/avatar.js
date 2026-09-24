@@ -323,6 +323,67 @@ function classifyMuscleVertex(mesh, vertexIndex, position, skinIndex, skinWeight
   return MUSCLE.none;
 }
 
+function captureHandCalibration(sourceBones, side) {
+  const suffix = side === 'left' ? 'l' : 'r';
+  const hand = sourceBones.get(`hand_${suffix}`);
+  const middle = sourceBones.get(`middle_01_${suffix}`);
+  const index = sourceBones.get(`index_01_${suffix}`);
+  const pinky = sourceBones.get(`pinky_01_${suffix}`);
+  if (!hand || !middle || !index || !pinky) return null;
+
+  hand.updateWorldMatrix(true, true);
+  const handPos = worldPosition(hand);
+  const fingerWorld = worldPosition(middle).sub(handPos).normalize();
+  const acrossWorld = worldPosition(index).sub(worldPosition(pinky));
+  acrossWorld.addScaledVector(fingerWorld, -acrossWorld.dot(fingerWorld));
+  if (acrossWorld.lengthSq() < 1e-10) return null;
+  acrossWorld.normalize();
+
+  const normalWorld = acrossWorld.clone().cross(fingerWorld).normalize();
+  const invHand = hand.getWorldQuaternion(Q()).invert();
+
+  const acrossLocal = acrossWorld.clone().applyQuaternion(invHand).normalize();
+  const fingerLocal = fingerWorld.clone().applyQuaternion(invHand).normalize();
+  const normalLocal = normalWorld.clone().applyQuaternion(invHand).normalize();
+
+  const localBasisQ = Q().setFromRotationMatrix(
+    new THREE.Matrix4().makeBasis(acrossLocal, fingerLocal, normalLocal),
+  );
+
+  return {
+    localBasisQ,
+    acrossSign: Math.sign(acrossWorld.x) || (side === 'left' ? 1 : -1),
+  };
+}
+
+function orientHandToBar(hand, calibration, barCenter) {
+  if (!hand || !calibration || !barCenter) return;
+
+  hand.updateWorldMatrix(true, true);
+  const wrist = worldPosition(hand);
+  const fingerTarget = barCenter.clone().sub(wrist);
+  if (fingerTarget.lengthSq() < 1e-10) return;
+  fingerTarget.normalize();
+
+  let acrossTarget = new THREE.Vector3(calibration.acrossSign, 0, 0);
+  acrossTarget.addScaledVector(fingerTarget, -acrossTarget.dot(fingerTarget));
+  if (acrossTarget.lengthSq() < 1e-10) acrossTarget = new THREE.Vector3(1, 0, 0);
+  acrossTarget.normalize();
+
+  const normalTarget = acrossTarget.clone().cross(fingerTarget).normalize();
+  const targetBasisQ = Q().setFromRotationMatrix(
+    new THREE.Matrix4().makeBasis(acrossTarget, fingerTarget, normalTarget),
+  );
+
+  const desiredWorldQ = targetBasisQ.multiply(calibration.localBasisQ.clone().invert());
+  const parentWorldQ = hand.parent
+    ? hand.parent.getWorldQuaternion(Q())
+    : Q().identity();
+
+  hand.quaternion.copy(parentWorldQ.invert().multiply(desiredWorldQ));
+  hand.updateWorldMatrix(false, true);
+}
+
 function fingerBasis(sourceBones, side, bone) {
   const suffix = side === 'left' ? 'l' : 'r';
   const wrist = sourceBones.get(`hand_${suffix}`);
@@ -386,9 +447,9 @@ function applyBarGrip(sourceBones) {
   // actually reaches the shaft. Curl the fingers into a neutral closed grip.
   for (const side of ['left', 'right']) {
     for (const finger of ['index', 'middle', 'ring', 'pinky']) {
-      curlFinger(sourceBones, side, finger, [58, 72, 52]);
+      curlFinger(sourceBones, side, finger, [46, 62, 42]);
     }
-    curlFinger(sourceBones, side, 'thumb', [30, 42, 32]);
+    curlFinger(sourceBones, side, 'thumb', [18, 26, 20]);
   }
 }
 
@@ -438,7 +499,10 @@ export class AvatarRig {
     this.bones = null;
     this.sourceBones = null;
     this.rest = null;
+    this.restAll = null;
     this.measurementPose = null;
+    this.measurementPoseAll = null;
+    this.handCalibration = null;
     this.ready = false;
     this.lastMeasurements = null;
     this.heatMeshes = [];
@@ -460,7 +524,12 @@ export class AvatarRig {
 
     this.sourceBones = collectSourceBones(this.root);
     this.bones = findBones(this.root, this.sourceBones);
+    this.restAll = captureRest(this.root, this.sourceBones);
     this.rest = captureRest(this.root, this.bones);
+    this.handCalibration = {
+      left: captureHandCalibration(this.sourceBones, 'left'),
+      right: captureHandCalibration(this.sourceBones, 'right'),
+    };
     this.scene.add(this.root);
     this.heatMeshes = prepareHeatmap(this.root);
     this.ready = true;
@@ -470,7 +539,7 @@ export class AvatarRig {
   applyMeasurements(m) {
     if (!this.ready) return;
 
-    restoreLocal(this.bones, this.rest);
+    restoreLocal(this.sourceBones, this.restAll);
     this.root.position.set(0, 0, 0);
     this.root.quaternion.identity();
     this.root.scale.setScalar(1);
@@ -494,13 +563,17 @@ export class AvatarRig {
 
     // Capture the measurement-adjusted neutral locals. Every animation frame
     // resets to THIS state, not to the original asset proportions.
+    this.measurementPoseAll = captureRest(this.root, this.sourceBones);
     this.measurementPose = captureRest(this.root, this.bones);
     this.lastMeasurements = m;
   }
 
   resetFrame() {
-    if (!this.measurementPose) return;
-    restoreLocal(this.bones, this.measurementPose);
+    if (!this.measurementPose || !this.measurementPoseAll) return;
+    // Restore every source bone, including all finger bones. The previous
+    // version restored only the major joints, so finger curls accumulated on
+    // every animation frame and produced the "glitching hand" behavior.
+    restoreLocal(this.sourceBones, this.measurementPoseAll);
     this.root.position.set(0, 0, 0);
     this.root.quaternion.identity();
     this.root.updateMatrixWorld(true);
@@ -565,6 +638,24 @@ export class AvatarRig {
 
     for (const [boneName, childName, target] of armTargets) {
       rotateToward(this.bones.get(boneName), this.bones.get(childName), target);
+    }
+
+    this.root.updateMatrixWorld(true);
+
+    // Explicitly orient each palm around the horizontal bar. Direction-only IK
+    // leaves forearm roll underconstrained, which is why the hands could flip
+    // even when the wrist position itself was correct.
+    const rigLeftHandBone = this.bones.get('LeftHand');
+    const rigRightHandBone = this.bones.get('RightHand');
+    if (rigLeftHandBone) {
+      const contact = pose.bar.clone();
+      contact.x = worldPosition(rigLeftHandBone).x;
+      orientHandToBar(rigLeftHandBone, this.handCalibration.left, contact);
+    }
+    if (rigRightHandBone) {
+      const contact = pose.bar.clone();
+      contact.x = worldPosition(rigRightHandBone).x;
+      orientHandToBar(rigRightHandBone, this.handCalibration.right, contact);
     }
 
     this.root.updateMatrixWorld(true);

@@ -183,10 +183,10 @@ function squatPose(m, style, stanceMult, progress) {
 
 function deadliftGripWidth(m, stanceWidth) {
   const ratio = stanceWidth / m.hipWidth;
-  if (ratio < 1.35) return Math.max(m.shoulderWidth * 1.02, stanceWidth + 0.12);
+  if (ratio < 1.40) return Math.max(m.shoulderWidth * 1.12, stanceWidth + 0.18);
   if (ratio > 1.6) return Math.max(0.30, Math.min(0.38, m.shoulderWidth * 0.82, stanceWidth - 0.22));
-  const t = (ratio - 1.35) / 0.25;
-  const outside = Math.max(m.shoulderWidth * 1.02, stanceWidth + 0.12);
+  const t = (ratio - 1.40) / 0.20;
+  const outside = Math.max(m.shoulderWidth * 1.12, stanceWidth + 0.18);
   const inside = Math.max(0.30, Math.min(0.38, m.shoulderWidth * 0.82, stanceWidth - 0.22));
   return lerp(outside, inside, t);
 }
@@ -196,55 +196,118 @@ function deadliftPose(m, stanceMult, progress) {
   const stanceWidth = m.hipWidth * stanceMult;
   const gripWidth = deadliftGripWidth(m, stanceWidth);
   const styleT = clamp((stanceMult - 0.8) / 1.8, 0, 1);
-  const bottomLean = degToRad(clamp(50 - styleT * 24 + (m.femur / m.torso - 0.92) * 14, 22, 58));
-  const topLean = degToRad(1.5);
-  const lean = lerp(bottomLean, topLean, s);
-  const barZ = 0.035;
-  const barYBottom = 0.225;
 
-  const shoulderZOffset = lerp(0.045, 0.01, s);
+  const bottomLean = degToRad(
+    clamp(50 - styleT * 24 + (m.femur / m.torso - 0.92) * 14, 22, 58),
+  );
+  const topLean = degToRad(2.0);
+  const lean = lerp(bottomLean, topLean, s);
+
+  // Coordinate convention: +Z is in front of the lifter.
+  // Keep the bar clearly in front of the shins/thighs instead of letting the
+  // shaft share the body's center plane.
+  const barZ = 0.19;
+  const barYBottom = 0.225;
+  const wristYOffset = 0.035;
+
   const dxArm = Math.abs(m.shoulderWidth - gripWidth) / 2;
-  const availableVertical = Math.sqrt(Math.max(0.02, Math.pow(m.upperArm + m.forearm, 2) - dxArm * dxArm - shoulderZOffset * shoulderZOffset));
-  const standingHipY = Math.sqrt(Math.max(0.25, Math.pow(m.femur + m.tibia - 0.015, 2) - Math.pow((stanceWidth - m.hipWidth) / 2, 2)));
-  const shoulderYTop = standingHipY + m.torso;
-  const barYTop = shoulderYTop - availableVertical;
+
+  // At the floor the shoulder is slightly in front of the bar. At lockout the
+  // shoulder sits behind it so the shaft rests against the FRONT of the thighs.
+  const shoulderRelativeZBottom = 0.055;
+  const shoulderRelativeZTop = -0.115;
+  const shoulderRelativeZ = lerp(shoulderRelativeZBottom, shoulderRelativeZTop, s);
+
+  const verticalArmFor = (relativeZ) => Math.sqrt(Math.max(
+    0.02,
+    Math.pow(m.upperArm + m.forearm, 2) -
+      dxArm * dxArm -
+      relativeZ * relativeZ,
+  ));
+
+  const standingHipY = Math.sqrt(Math.max(
+    0.25,
+    Math.pow(m.femur + m.tibia - 0.015, 2) -
+      Math.pow((stanceWidth - m.hipWidth) / 2, 2),
+  ));
+
+  const shoulderYTop = standingHipY + m.torso * Math.cos(topLean);
+  const barYTop = shoulderYTop - verticalArmFor(shoulderRelativeZTop) - wristYOffset;
   const barY = lerp(barYBottom, barYTop, s);
 
-  const shoulderCenter = v(0, barY + availableVertical, barZ + shoulderZOffset);
-  const hipCenter = shoulderCenter.clone().sub(v(0, m.torso * Math.cos(lean), m.torso * Math.sin(lean)));
-  const sides = sidePoints(hipCenter, shoulderCenter, m.hipWidth, m.shoulderWidth);
+  const availableVertical = verticalArmFor(shoulderRelativeZ);
+  const shoulderCenter = v(
+    0,
+    barY + wristYOffset + availableVertical,
+    barZ + shoulderRelativeZ,
+  );
+  const hipCenter = shoulderCenter
+    .clone()
+    .sub(v(0, m.torso * Math.cos(lean), m.torso * Math.sin(lean)));
+
+  const sides = sidePoints(
+    hipCenter,
+    shoulderCenter,
+    m.hipWidth,
+    m.shoulderWidth,
+  );
+
   const ankles = {
     leftAnkle: v(-stanceWidth / 2, 0.02, 0),
     rightAnkle: v(stanceWidth / 2, 0.02, 0),
   };
+
   const knees = {
     leftKnee: legIK(sides.leftHip, ankles.leftAnkle, m.femur, m.tibia),
     rightKnee: legIK(sides.rightHip, ankles.rightAnkle, m.femur, m.tibia),
   };
+
   const hands = {
-    // Wrist sits a few centimeters above the shaft; the bar itself is held in the palm/fingers.
-    leftHand: v(-gripWidth / 2, barY + 0.035, barZ),
-    rightHand: v(gripWidth / 2, barY + 0.035, barZ),
+    leftHand: v(-gripWidth / 2, barY + wristYOffset, barZ),
+    rightHand: v(gripWidth / 2, barY + wristYOffset, barZ),
   };
+
   const elbows = {
-    // Deadlift elbows should not bend. Build the elbow directly on the
-    // shoulder→wrist line at the measured humerus length.
-    leftElbow: straightArmElbow(sides.leftShoulder, hands.leftHand, m.upperArm),
-    rightElbow: straightArmElbow(sides.rightShoulder, hands.rightHand, m.upperArm),
+    leftElbow: straightArmElbow(
+      sides.leftShoulder,
+      hands.leftHand,
+      m.upperArm,
+    ),
+    rightElbow: straightArmElbow(
+      sides.rightShoulder,
+      hands.rightHand,
+      m.upperArm,
+    ),
   };
+
   const bar = v(0, barY, barZ);
   const barForce = m.barMass * G;
-  const kneeMid = knees.leftKnee.clone().add(knees.rightKnee).multiplyScalar(0.5);
+  const kneeMid = knees.leftKnee
+    .clone()
+    .add(knees.rightKnee)
+    .multiplyScalar(0.5);
+
   const hipMoment = horizontalMomentArm(hipCenter, barZ) * barForce;
   const kneeMoment = horizontalMomentArm(kneeMid, barZ) * barForce;
-  const trunkMoment = Math.abs(shoulderCenter.z - hipCenter.z) * (m.bodyMass * G * 0.46) + hipMoment;
+  const trunkMoment =
+    Math.abs(shoulderCenter.z - hipCenter.z) * (m.bodyMass * G * 0.46) +
+    hipMoment;
+
   const frontalHipOffset = Math.abs(stanceWidth - m.hipWidth) / 2;
-  const hipAbduction = radToDeg(Math.atan2(frontalHipOffset, Math.max(0.05, m.femur)));
+  const hipAbduction = radToDeg(
+    Math.atan2(frontalHipOffset, Math.max(0.05, m.femur)),
+  );
+
   const totalForce = barForce + m.bodyMass * G * 0.46;
   const hipD = demandFromMoment(hipMoment, totalForce);
   const kneeD = demandFromMoment(kneeMoment, totalForce);
   const trunkD = demandFromMoment(trunkMoment, totalForce);
-  const adductorD = clamp((hipAbduction / 42) * 0.62 + hipD * 0.28, 0, 1);
+  const adductorD = clamp(
+    (hipAbduction / 42) * 0.62 + hipD * 0.28,
+    0,
+    1,
+  );
+
   const demands = inactiveDemands();
   demands.quads = kneeD;
   demands.glutes = clamp(0.86 * hipD + 0.10 * adductorD, 0, 1);
@@ -255,8 +318,19 @@ function deadliftPose(m, stanceMult, progress) {
   return {
     movement: 'deadlift',
     bar,
-    barPath: { start: v(0, barYBottom, barZ), end: v(0, barYTop, barZ) },
-    joints: { hipCenter, shoulderCenter, ...sides, ...ankles, ...knees, ...hands, ...elbows },
+    barPath: {
+      start: v(0, barYBottom, barZ),
+      end: v(0, barYTop, barZ),
+    },
+    joints: {
+      hipCenter,
+      shoulderCenter,
+      ...sides,
+      ...ankles,
+      ...knees,
+      ...hands,
+      ...elbows,
+    },
     demands,
     metrics: {
       hipMoment,
