@@ -56,10 +56,10 @@
             <input id="showBarPath" type="checkbox" checked />
             <span>Show bar travel path</span>
           </label>
-          <div class="disabled-feature" title="Enabled after the anatomical model and mechanics are validated.">
-            <span>Muscle heatmap</span>
-            <span class="badge">After model validation</span>
-          </div>
+          <label class="toggle-row">
+            <input id="showMuscleHeat" type="checkbox" checked />
+            <span>Show muscle demand on model</span>
+          </label>
         </section>
       </aside>
 
@@ -90,6 +90,15 @@
 
         <section>
           <div class="section-heading">
+            <h2>Muscle demand</h2>
+            <span class="demand-key"><i></i> low → high</span>
+          </div>
+          <div id="muscleDemand" class="demand-list"></div>
+          <p class="helper-text">Green → yellow → red is modeled relative demand from the current external-moment geometry. It is not EMG or measured individual muscle force.</p>
+        </section>
+
+        <section>
+          <div class="section-heading">
             <h2>Why it changed</h2>
           </div>
           <div id="explanation" class="explanation"></div>
@@ -97,7 +106,7 @@
 
         <section class="method-card">
           <strong>Current model scope</strong>
-          <p>These are transparent external-moment and geometry estimates, not measured muscle force. Heat coloring stays disabled until the human model and joint mechanics pass visual validation.</p>
+          <p>These are transparent external-moment and geometry estimates, not measured muscle force or EMG. The surface heatmap uses those same modeled demands so changes in stance, grip, load, and anthropometry remain visible and traceable.</p>
         </section>
       </aside>
     </main>

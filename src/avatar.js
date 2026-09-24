@@ -35,6 +35,34 @@ const SOURCE_BONES = Object.freeze({
 const V = () => new THREE.Vector3();
 const Q = () => new THREE.Quaternion();
 
+const MUSCLE = Object.freeze({
+  none: 0,
+  quads: 1,
+  glutes: 2,
+  hamstrings: 3,
+  adductors: 4,
+  erectors: 5,
+  pecs: 6,
+  triceps: 7,
+  frontDelts: 8,
+});
+
+const MUSCLE_NAME = Object.freeze([
+  null, 'quads', 'glutes', 'hamstrings', 'adductors',
+  'erectors', 'pecs', 'triceps', 'frontDelts',
+]);
+
+const BASE_COLOR = new THREE.Color(0x667789);
+const HEAT_GREEN = new THREE.Color(0x35c76f);
+const HEAT_YELLOW = new THREE.Color(0xf4d35e);
+const HEAT_RED = new THREE.Color(0xff4d4f);
+
+function demandColor(value, target = new THREE.Color()) {
+  const x = THREE.MathUtils.clamp(value ?? 0, 0, 1);
+  if (x <= 0.5) return target.copy(HEAT_GREEN).lerp(HEAT_YELLOW, x * 2);
+  return target.copy(HEAT_YELLOW).lerp(HEAT_RED, (x - 0.5) * 2);
+}
+
 function findBones(root) {
   const bySource = new Map();
   root.traverse((node) => {
@@ -227,6 +255,110 @@ function restoreWorldOrientation(bone, desiredWorldQ) {
   bone.updateWorldMatrix(false, true);
 }
 
+function alignChildRoot(parentBone, childBone, targetWorld) {
+  if (!parentBone || !childBone || !targetWorld) return;
+  parentBone.updateWorldMatrix(true, true);
+  const current = worldPosition(childBone);
+  moveBoneByWorldDelta(parentBone, targetWorld.clone().sub(current));
+}
+
+function classifyMuscleVertex(mesh, vertexIndex, position, skinIndex, skinWeight) {
+  if (!mesh.isSkinnedMesh || !mesh.skeleton || !skinIndex || !skinWeight) return MUSCLE.none;
+
+  let slot = 0;
+  let best = -1;
+  const read = (attr, index, component) => {
+    if (component === 0) return attr.getX(index);
+    if (component === 1) return attr.getY(index);
+    if (component === 2) return attr.getZ(index);
+    return attr.getW(index);
+  };
+
+  for (let k = 0; k < 4; k++) {
+    const w = read(skinWeight, vertexIndex, k);
+    if (w > best) { best = w; slot = k; }
+  }
+
+  const boneIndex = read(skinIndex, vertexIndex, slot);
+  const bone = mesh.skeleton.bones[boneIndex];
+  if (!bone) return MUSCLE.none;
+
+  const name = bone.name;
+  const local = V().fromBufferAttribute(position, vertexIndex);
+  const p = mesh.localToWorld(local.clone());
+  const b = worldPosition(bone);
+  const dz = p.z - b.z;
+  const dy = p.y - b.y;
+  const dx = p.x - b.x;
+
+  if (name === 'thigh_l' || name === 'thigh_r') {
+    const left = name.endsWith('_l');
+    const inner = left ? dx < -0.018 : dx > 0.018;
+    const proximal = dy > -0.12;
+    if (inner && proximal) return MUSCLE.adductors;
+    return dz >= -0.004 ? MUSCLE.quads : MUSCLE.hamstrings;
+  }
+
+  if (name === 'pelvis') {
+    if (dz < -0.015 && dy < 0.08) return MUSCLE.glutes;
+    return MUSCLE.none;
+  }
+
+  if (name === 'spine_01' || name === 'spine_02' || name === 'spine_03') {
+    if (dz < -0.012) return MUSCLE.erectors;
+    if ((name === 'spine_02' || name === 'spine_03') && dz > 0.010) return MUSCLE.pecs;
+    return MUSCLE.none;
+  }
+
+  if (name === 'upperarm_l' || name === 'upperarm_r') {
+    const shoulder = bone;
+    const distance = p.distanceTo(worldPosition(shoulder));
+    if (distance < 0.12 && dz > -0.005) return MUSCLE.frontDelts;
+    if (dz < -0.005) return MUSCLE.triceps;
+  }
+
+  return MUSCLE.none;
+}
+
+function prepareHeatmap(root) {
+  const heatMeshes = [];
+  root.updateMatrixWorld(true);
+
+  root.traverse((node) => {
+    if (!node.isSkinnedMesh || !node.geometry) return;
+
+    const geometry = node.geometry;
+    const position = geometry.getAttribute('position');
+    const skinIndex = geometry.getAttribute('skinIndex');
+    const skinWeight = geometry.getAttribute('skinWeight');
+    if (!position || !skinIndex || !skinWeight) return;
+
+    const groups = new Uint8Array(position.count);
+    const colors = new Float32Array(position.count * 3);
+
+    for (let i = 0; i < position.count; i++) {
+      groups[i] = classifyMuscleVertex(node, i, position, skinIndex, skinWeight);
+      colors[i * 3] = BASE_COLOR.r;
+      colors[i * 3 + 1] = BASE_COLOR.g;
+      colors[i * 3 + 2] = BASE_COLOR.b;
+    }
+
+    const attr = new THREE.BufferAttribute(colors, 3);
+    geometry.setAttribute('color', attr);
+
+    node.material = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      vertexColors: true,
+      roughness: 0.72,
+      metalness: 0.02,
+    });
+
+    heatMeshes.push({ mesh: node, groups, colors: attr });
+  });
+
+  return heatMeshes;
+}
+
 export class AvatarRig {
   constructor(scene) {
     this.scene = scene;
@@ -236,6 +368,9 @@ export class AvatarRig {
     this.measurementPose = null;
     this.ready = false;
     this.lastMeasurements = null;
+    this.heatMeshes = [];
+    this.heatmapEnabled = true;
+    this.lastDemands = null;
   }
 
   async load() {
@@ -248,19 +383,12 @@ export class AvatarRig {
       node.castShadow = true;
       node.receiveShadow = true;
       node.frustumCulled = false;
-
-      // Keep this as a clean biomechanics mannequin. The source is already an
-      // athletic male mesh; one matte material keeps attention on movement.
-      node.material = new THREE.MeshStandardMaterial({
-        color: 0x667789,
-        roughness: 0.72,
-        metalness: 0.02,
-      });
     });
 
     this.bones = findBones(this.root);
     this.rest = captureRest(this.root, this.bones);
     this.scene.add(this.root);
+    this.heatMeshes = prepareHeatmap(this.root);
     this.ready = true;
     return this;
   }
@@ -314,6 +442,16 @@ export class AvatarRig {
     translateRigToHips(this.root, hips, j.hipCenter);
     placeTorso(pose, this.bones);
 
+    // Make the rig's actual joint origins match the analytic skeleton before
+    // solving segment rotations. Without this, an elbow/hand target can be
+    // mathematically valid but unreachable from the mesh's shoulder location.
+    setBoneWorldPosition(this.bones.get('LeftUpLeg'), j.rightHip);
+    setBoneWorldPosition(this.bones.get('RightUpLeg'), j.leftHip);
+
+    alignChildRoot(this.bones.get('LeftShoulder'), this.bones.get('LeftArm'), j.rightShoulder);
+    alignChildRoot(this.bones.get('RightShoulder'), this.bones.get('RightArm'), j.leftShoulder);
+    this.root.updateMatrixWorld(true);
+
     // Source rig uses anatomical Left=+X and Right=-X. Our solver names
     // world -X "left" and world +X "right", so map them explicitly.
     const legTargets = [
@@ -337,38 +475,12 @@ export class AvatarRig {
       this.measurementPose.worldQ.get('RightFoot'),
     );
 
-    let rigLeftElbow;
-    let rigRightElbow;
-    let rigLeftHand;
-    let rigRightHand;
-
-    if (j.leftElbow && j.leftHand) {
-      // Bench/deadlift already provide solved elbow + hand targets.
-      rigLeftElbow = j.rightElbow;
-      rigLeftHand = j.rightHand;
-      rigRightElbow = j.leftElbow;
-      rigRightHand = j.leftHand;
-    } else {
-      // Squat rack position: hands are constrained to the bar shaft.
-      const shoulderWidth = this.lastMeasurements?.shoulderWidth || 0.46;
-      const gripWidth = Math.max(0.72, shoulderWidth * 1.65);
-
-      rigLeftHand = pose.bar.clone().add(new THREE.Vector3(gripWidth / 2, 0, 0));
-      rigRightHand = pose.bar.clone().add(new THREE.Vector3(-gripWidth / 2, 0, 0));
-
-      const rigLeftShoulder = j.rightShoulder;
-      const rigRightShoulder = j.leftShoulder;
-
-      rigLeftElbow = rigLeftShoulder
-        .clone()
-        .lerp(rigLeftHand, 0.55)
-        .add(new THREE.Vector3(0.07, -0.10, 0.10));
-
-      rigRightElbow = rigRightShoulder
-        .clone()
-        .lerp(rigRightHand, 0.55)
-        .add(new THREE.Vector3(-0.07, -0.10, 0.10));
-    }
+    // All movements now supply exact two-link arm targets from the
+    // biomechanics solver. No visual-only arm pose is allowed here.
+    const rigLeftElbow = j.rightElbow;
+    const rigLeftHand = j.rightHand;
+    const rigRightElbow = j.leftElbow;
+    const rigRightHand = j.leftHand;
 
     const armTargets = [
       ['LeftArm', 'LeftForeArm', rigLeftElbow],
@@ -382,5 +494,35 @@ export class AvatarRig {
     }
 
     this.root.updateMatrixWorld(true);
+    this.updateMuscleDemand(pose.demands);
+  }
+
+  setHeatmapEnabled(enabled) {
+    this.heatmapEnabled = Boolean(enabled);
+    this.updateMuscleDemand(this.lastDemands);
+  }
+
+  updateMuscleDemand(demands) {
+    this.lastDemands = demands || this.lastDemands || {};
+    const temp = new THREE.Color();
+
+    for (const entry of this.heatMeshes) {
+      const array = entry.colors.array;
+      for (let i = 0; i < entry.groups.length; i++) {
+        const group = entry.groups[i];
+        let color = BASE_COLOR;
+
+        if (this.heatmapEnabled && group !== MUSCLE.none) {
+          const key = MUSCLE_NAME[group];
+          color = demandColor(this.lastDemands[key] ?? 0.035, temp);
+        }
+
+        const o = i * 3;
+        array[o] = color.r;
+        array[o + 1] = color.g;
+        array[o + 2] = color.b;
+      }
+      entry.colors.needsUpdate = true;
+    }
   }
 }

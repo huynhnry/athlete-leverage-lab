@@ -117,3 +117,14 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
   .topbar { display: grid; }
   .status-cluster { justify-content: flex-start; }
 }
+
+
+.demand-key { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: .66rem; }
+.demand-key i { width: 56px; height: 7px; border-radius: 999px; background: linear-gradient(90deg, #35c76f 0%, #f4d35e 50%, #ff4d4f 100%); display: inline-block; }
+.demand-list { display: grid; gap: 10px; }
+.demand-row { display: grid; gap: 5px; }
+.demand-row-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: .74rem; }
+.demand-row-head span { color: var(--muted); }
+.demand-row-head strong { font-variant-numeric: tabular-nums; font-size: .72rem; }
+.demand-track { height: 8px; border-radius: 999px; background: #202833; overflow: hidden; border: 1px solid #2b3541; }
+.demand-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #35c76f 0%, #f4d35e 55%, #ff4d4f 100%); }
