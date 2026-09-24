@@ -1,4 +1,4 @@
-export const MODEL_URL = 'https://cdn.jsdelivr.net/gh/nirholas/three.ws@482a12381caeb4122e2444cf8727a476f2c4dfc2/public/avatars/parametric-base.glb';
+export const MODEL_URL = 'https://cdn.jsdelivr.net/gh/programasweights/avatar@d5c4a204c6485ebd7d1d0ced6f1e261509874af5/public/assets/character.glb';
 
 export const DEFAULT_MEASUREMENTS = Object.freeze({
   height: 175,
