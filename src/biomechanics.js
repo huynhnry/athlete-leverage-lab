@@ -110,8 +110,10 @@ function squatPose(m, style, stanceMult, progress) {
   // on the shaft.
   const squatGrip = Math.max(m.shoulderWidth * 1.55, m.shoulderWidth + 0.22);
   const hands = {
-    leftHand: v(-squatGrip / 2, barY, barZ),
-    rightHand: v(squatGrip / 2, barY, barZ),
+    // "Hand" here is the wrist joint target. Offset it slightly forward/down
+    // from the shaft center so the bar sits in the palm instead of through the wrist mesh.
+    leftHand: v(-squatGrip / 2, barY - 0.015, barZ + 0.035),
+    rightHand: v(squatGrip / 2, barY - 0.015, barZ + 0.035),
   };
   const elbows = {
     leftElbow: armIK(sides.leftShoulder, hands.leftHand, m.upperArm, m.forearm, 'left', 0.62),
@@ -201,8 +203,9 @@ function deadliftPose(m, stanceMult, progress) {
     rightKnee: legIK(sides.rightHip, ankles.rightAnkle, m.femur, m.tibia),
   };
   const hands = {
-    leftHand: v(-gripWidth / 2, barY, barZ),
-    rightHand: v(gripWidth / 2, barY, barZ),
+    // Wrist sits a few centimeters above the shaft; the bar itself is held in the palm/fingers.
+    leftHand: v(-gripWidth / 2, barY + 0.035, barZ),
+    rightHand: v(gripWidth / 2, barY + 0.035, barZ),
   };
   const elbows = {
     leftElbow: armIK(sides.leftShoulder, hands.leftHand, m.upperArm, m.forearm, 'left', 0.15),
@@ -268,8 +271,10 @@ function benchPose(m, gripMult, progress) {
   const barY = lerp(touchY, lockY, s);
   const barZ = lerp(touchZ, lockZ, s);
   const hands = {
-    leftHand: v(-gripWidth / 2, barY, barZ),
-    rightHand: v(gripWidth / 2, barY, barZ),
+    // Bench wrist target is slightly above and toward the shoulder from the shaft.
+    // This puts the bar across the palm rather than through the wrist joint.
+    leftHand: v(-gripWidth / 2, barY + 0.025, barZ - 0.035),
+    rightHand: v(gripWidth / 2, barY + 0.025, barZ - 0.035),
   };
   const elbows = {
     leftElbow: armIK(sides.leftShoulder, hands.leftHand, m.upperArm, m.forearm, 'left', 0.95),
@@ -287,8 +292,9 @@ function benchPose(m, gripMult, progress) {
   };
   const bar = v(0, barY, barZ);
   const halfForce = m.barMass * G / 2;
-  const shoulderMoment = sides.rightShoulder.clone().sub(hands.rightHand).cross(v(0, -halfForce, 0)).length();
-  const elbowMoment = elbows.rightElbow.clone().sub(hands.rightHand).cross(v(0, -halfForce, 0)).length();
+  const rightBarContact = v(gripWidth / 2, barY, barZ);
+  const shoulderMoment = sides.rightShoulder.clone().sub(rightBarContact).cross(v(0, -halfForce, 0)).length();
+  const elbowMoment = elbows.rightElbow.clone().sub(rightBarContact).cross(v(0, -halfForce, 0)).length();
   const elbowAngle = angleBetween(sides.rightShoulder, elbows.rightElbow, hands.rightHand);
   const shoulderD = demandFromMoment(shoulderMoment, halfForce, 0.26);
   const elbowD = demandFromMoment(elbowMoment, halfForce, 0.24);
