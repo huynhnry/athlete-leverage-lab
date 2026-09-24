@@ -23,6 +23,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+      - name: Check JavaScript syntax
+        run: |
+          for file in src/*.js; do node --check "$file"; done
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Upload static site
