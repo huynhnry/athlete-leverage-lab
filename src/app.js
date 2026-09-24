@@ -14,6 +14,7 @@ const state = {
   direction: 1,
   lastTs: performance.now(),
   showBarPath: true,
+  showMuscleHeat: true,
 };
 
 const viewport = $('#viewport');
@@ -122,8 +123,32 @@ function metricsFor(pose) {
   ];
 }
 
+const MUSCLE_LABELS = Object.freeze({
+  quads: 'Quads',
+  glutes: 'Glutes',
+  hamstrings: 'Hamstrings',
+  adductors: 'Adductors',
+  erectors: 'Spinal erectors',
+  pecs: 'Pecs',
+  triceps: 'Triceps',
+  frontDelts: 'Front delts',
+});
+
+function renderDemand(pose) {
+  const demands = pose.demands || {};
+  $('#muscleDemand').innerHTML = Object.entries(MUSCLE_LABELS).map(([key, label]) => {
+    const value = Math.max(0, Math.min(1, demands[key] ?? 0));
+    return `
+      <div class="demand-row">
+        <div class="demand-row-head"><span>${label}</span><strong>${Math.round(value * 100)}%</strong></div>
+        <div class="demand-track"><i style="width:${(value * 100).toFixed(1)}%"></i></div>
+      </div>`;
+  }).join('');
+}
+
 function renderMetrics(pose) {
   $('#metricCards').innerHTML = metricsFor(pose).map(([label, value, sub]) => `<div class="metric-card"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`).join('');
+  renderDemand(pose);
   const summary = proportionSummary(state.measurements);
   const common = `<p><strong>Your proportions:</strong> femur/torso ${summary.femurTorso.toFixed(2)}, femur/tibia ${summary.femurTibia.toFixed(2)}, arm/torso ${summary.armTorso.toFixed(2)}. Those ratios feed the joint geometry rather than acting as labels.</p>`;
   let detail = '';
@@ -149,7 +174,10 @@ function updateAll(reapplyMeasurements) {
   const m = toMeters(sanitizeMeasurements(state.measurements));
   if (avatar.ready && reapplyMeasurements) avatar.applyMeasurements(m);
   const pose = solveMovement(m, state.movement, state.controls, state.progress);
-  if (avatar.ready) avatar.pose(pose);
+  if (avatar.ready) {
+    avatar.setHeatmapEnabled(state.showMuscleHeat);
+    avatar.pose(pose);
+  }
   lab.updatePose(pose, state.showBarPath);
   renderMetrics(pose); updateLabels();
 }
@@ -167,6 +195,11 @@ function bindStaticControls() {
     state.progress = Number(e.target.value); state.playing = false; $('#playPause').textContent = 'Play'; updateAll(false);
   });
   $('#showBarPath').addEventListener('change', (e) => { state.showBarPath = e.target.checked; updateAll(false); });
+  $('#showMuscleHeat').addEventListener('change', (e) => {
+    state.showMuscleHeat = e.target.checked;
+    if (avatar.ready) avatar.setHeatmapEnabled(state.showMuscleHeat);
+    updateAll(false);
+  });
   $('#resetCamera').addEventListener('click', () => lab.resetCamera(state.movement));
 }
 
