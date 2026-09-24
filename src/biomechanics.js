@@ -183,10 +183,10 @@ function squatPose(m, style, stanceMult, progress) {
 
 function deadliftGripWidth(m, stanceWidth) {
   const ratio = stanceWidth / m.hipWidth;
-  if (ratio < 1.35) return Math.max(m.shoulderWidth * 1.02, stanceWidth + 0.12);
+  if (ratio < 1.40) return Math.max(m.shoulderWidth * 1.12, stanceWidth + 0.18);
   if (ratio > 1.6) return Math.max(0.30, Math.min(0.38, m.shoulderWidth * 0.82, stanceWidth - 0.22));
-  const t = (ratio - 1.35) / 0.25;
-  const outside = Math.max(m.shoulderWidth * 1.02, stanceWidth + 0.12);
+  const t = (ratio - 1.40) / 0.20;
+  const outside = Math.max(m.shoulderWidth * 1.12, stanceWidth + 0.18);
   const inside = Math.max(0.30, Math.min(0.38, m.shoulderWidth * 0.82, stanceWidth - 0.22));
   return lerp(outside, inside, t);
 }
