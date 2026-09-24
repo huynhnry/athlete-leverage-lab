@@ -63,12 +63,15 @@ function demandColor(value, target = new THREE.Color()) {
   return target.copy(HEAT_YELLOW).lerp(HEAT_RED, (x - 0.5) * 2);
 }
 
-function findBones(root) {
+function collectSourceBones(root) {
   const bySource = new Map();
   root.traverse((node) => {
     if (node.isBone && node.name) bySource.set(node.name, node);
   });
+  return bySource;
+}
 
+function findBones(root, bySource = collectSourceBones(root)) {
   const out = new Map();
   for (const [canonical, source] of Object.entries(SOURCE_BONES)) {
     const bone = bySource.get(source);
@@ -320,6 +323,75 @@ function classifyMuscleVertex(mesh, vertexIndex, position, skinIndex, skinWeight
   return MUSCLE.none;
 }
 
+function fingerBasis(sourceBones, side, bone) {
+  const suffix = side === 'left' ? 'l' : 'r';
+  const wrist = sourceBones.get(`hand_${suffix}`);
+  const middle = sourceBones.get(`middle_01_${suffix}`);
+  const index = sourceBones.get(`index_01_${suffix}`);
+  const pinky = sourceBones.get(`pinky_01_${suffix}`);
+  const end = bone?.children?.find((child) => child.isBone);
+
+  if (!wrist || !middle || !index || !pinky || !end) return null;
+
+  const position = (b) => b.getWorldPosition(V());
+  const along = position(middle).sub(position(wrist)).normalize();
+  const across = position(index).sub(position(pinky)).normalize();
+  const normal = along
+    .clone()
+    .cross(across)
+    .normalize()
+    .multiplyScalar(side === 'left' ? 1 : -1);
+
+  const y = position(end).sub(position(bone)).normalize();
+  const z = y
+    .clone()
+    .cross(normal)
+    .normalize()
+    .multiplyScalar(side === 'left' ? 1 : -1);
+  const x = y.clone().cross(z).normalize();
+
+  const inverse = bone.getWorldQuaternion(Q()).invert();
+  return new THREE.Quaternion().setFromRotationMatrix(
+    new THREE.Matrix4().makeBasis(
+      x.applyQuaternion(inverse),
+      y.applyQuaternion(inverse),
+      z.applyQuaternion(inverse),
+    ),
+  );
+}
+
+function curlFinger(sourceBones, side, finger, angles) {
+  const suffix = side === 'left' ? 'l' : 'r';
+
+  for (let segment = 1; segment <= 3; segment++) {
+    const bone = sourceBones.get(`${finger}_0${segment}_${suffix}`);
+    if (!bone) continue;
+
+    bone.updateWorldMatrix(true, true);
+    const basis = fingerBasis(sourceBones, side, bone);
+    if (!basis) continue;
+
+    const delta = Q().setFromEuler(
+      new THREE.Euler(0, 0, THREE.MathUtils.degToRad(angles[segment - 1]), 'XYZ'),
+    );
+    bone.quaternion.multiply(
+      basis.clone().multiply(delta).multiply(basis.clone().invert()),
+    );
+    bone.updateWorldMatrix(false, true);
+  }
+}
+
+function applyBarGrip(sourceBones) {
+  // A straight-finger T-pose hand looks wildly wrong even when the wrist
+  // actually reaches the shaft. Curl the fingers into a neutral closed grip.
+  for (const side of ['left', 'right']) {
+    for (const finger of ['index', 'middle', 'ring', 'pinky']) {
+      curlFinger(sourceBones, side, finger, [58, 72, 52]);
+    }
+    curlFinger(sourceBones, side, 'thumb', [30, 42, 32]);
+  }
+}
+
 function prepareHeatmap(root) {
   const heatMeshes = [];
   root.updateMatrixWorld(true);
@@ -364,6 +436,7 @@ export class AvatarRig {
     this.scene = scene;
     this.root = null;
     this.bones = null;
+    this.sourceBones = null;
     this.rest = null;
     this.measurementPose = null;
     this.ready = false;
@@ -385,7 +458,8 @@ export class AvatarRig {
       node.frustumCulled = false;
     });
 
-    this.bones = findBones(this.root);
+    this.sourceBones = collectSourceBones(this.root);
+    this.bones = findBones(this.root, this.sourceBones);
     this.rest = captureRest(this.root, this.bones);
     this.scene.add(this.root);
     this.heatMeshes = prepareHeatmap(this.root);
@@ -493,6 +567,8 @@ export class AvatarRig {
       rotateToward(this.bones.get(boneName), this.bones.get(childName), target);
     }
 
+    this.root.updateMatrixWorld(true);
+    applyBarGrip(this.sourceBones);
     this.root.updateMatrixWorld(true);
     this.updateMuscleDemand(pose.demands);
   }
