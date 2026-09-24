@@ -267,12 +267,19 @@ function classifyMuscleVertex(mesh, vertexIndex, position, skinIndex, skinWeight
 
   let slot = 0;
   let best = -1;
+  const read = (attr, index, component) => {
+    if (component === 0) return attr.getX(index);
+    if (component === 1) return attr.getY(index);
+    if (component === 2) return attr.getZ(index);
+    return attr.getW(index);
+  };
+
   for (let k = 0; k < 4; k++) {
-    const w = skinWeight.getComponent(vertexIndex, k);
+    const w = read(skinWeight, vertexIndex, k);
     if (w > best) { best = w; slot = k; }
   }
 
-  const boneIndex = skinIndex.getComponent(vertexIndex, slot);
+  const boneIndex = read(skinIndex, vertexIndex, slot);
   const bone = mesh.skeleton.bones[boneIndex];
   if (!bone) return MUSCLE.none;
 
@@ -438,8 +445,8 @@ export class AvatarRig {
     // Make the rig's actual joint origins match the analytic skeleton before
     // solving segment rotations. Without this, an elbow/hand target can be
     // mathematically valid but unreachable from the mesh's shoulder location.
-    alignChildRoot(this.bones.get('Hips'), this.bones.get('LeftUpLeg'), j.rightHip);
-    alignChildRoot(this.bones.get('Hips'), this.bones.get('RightUpLeg'), j.leftHip);
+    setBoneWorldPosition(this.bones.get('LeftUpLeg'), j.rightHip);
+    setBoneWorldPosition(this.bones.get('RightUpLeg'), j.leftHip);
 
     alignChildRoot(this.bones.get('LeftShoulder'), this.bones.get('LeftArm'), j.rightShoulder);
     alignChildRoot(this.bones.get('RightShoulder'), this.bones.get('RightArm'), j.leftShoulder);
