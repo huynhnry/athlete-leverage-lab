@@ -144,14 +144,11 @@ function aimBoneAtWorld(bone, child, targetWorld) {
   if (childLocalDir.lengthSq() < 1e-10) return;
   childLocalDir.normalize();
 
-  // Critical fix: preserve the authored bind/rest orientation. The previous
-  // implementation treated the child's local offset as though the bone's rest
-  // quaternion were identity, which twisted limbs across the body and pulled
-  // the hands into the face.
-  const restQ = bone.quaternion.clone();
-  const restAxisInParent = childLocalDir.clone().applyQuaternion(restQ).normalize();
-  const delta = new THREE.Quaternion().setFromUnitVectors(restAxisInParent, desiredParent);
-  bone.quaternion.copy(delta.multiply(restQ));
+  // child.position already lives in the bone's local frame. Setting the bone
+  // quaternion directly from that authored local axis to the desired parent-
+  // frame direction is the correct scene-graph relation. Multiplying the bind
+  // quaternion again double-rotated the limbs.
+  bone.quaternion.setFromUnitVectors(childLocalDir, desiredParent);
   bone.updateWorldMatrix(true, true);
 }
 
@@ -279,24 +276,28 @@ export class AvatarRig {
     translateRigToHips(this.root, hips, j.hipCenter);
     setTorsoChainTargets(j, this.bones);
 
+    // The source rig uses anatomical Left/Right. When the avatar faces the
+    // camera, anatomical left is world +X (screen-right). The biomechanics
+    // solver labels world -X as "left". Map those conventions explicitly or
+    // every limb is driven across the body's midline.
     const chain = [
-      ['LeftUpLeg','LeftLeg', j.leftKnee], ['LeftLeg','LeftFoot', j.leftAnkle],
-      ['RightUpLeg','RightLeg', j.rightKnee], ['RightLeg','RightFoot', j.rightAnkle],
+      ['LeftUpLeg','LeftLeg', j.rightKnee], ['LeftLeg','LeftFoot', j.rightAnkle],
+      ['RightUpLeg','RightLeg', j.leftKnee], ['RightLeg','RightFoot', j.leftAnkle],
     ];
     if (j.leftElbow && j.leftHand) {
-      chain.push(['LeftArm','LeftForeArm', j.leftElbow], ['LeftForeArm','LeftHand', j.leftHand]);
-      chain.push(['RightArm','RightForeArm', j.rightElbow], ['RightForeArm','RightHand', j.rightHand]);
+      chain.push(['LeftArm','LeftForeArm', j.rightElbow], ['LeftForeArm','LeftHand', j.rightHand]);
+      chain.push(['RightArm','RightForeArm', j.leftElbow], ['RightForeArm','RightHand', j.leftHand]);
     } else {
       // Squat rack grip: hands actually sit on the bar instead of floating in
       // front of the face. This is still a generic symmetric rack grip; a user
       // grip-width control can come after the base pose is visually validated.
       const gripWidth = Math.max(0.72, (this.lastMeasurements?.shoulderWidth || 0.46) * 1.65);
-      const lHand = pose.bar.clone().add(new THREE.Vector3(-gripWidth / 2, 0, 0));
-      const rHand = pose.bar.clone().add(new THREE.Vector3( gripWidth / 2, 0, 0));
-      const lElbow = j.leftShoulder.clone().lerp(lHand, 0.58).add(new THREE.Vector3(-0.06, -0.10, 0.08));
-      const rElbow = j.rightShoulder.clone().lerp(rHand, 0.58).add(new THREE.Vector3( 0.06, -0.10, 0.08));
-      chain.push(['LeftArm','LeftForeArm', lElbow], ['LeftForeArm','LeftHand', lHand]);
-      chain.push(['RightArm','RightForeArm', rElbow], ['RightForeArm','RightHand', rHand]);
+      const rigLeftHand = pose.bar.clone().add(new THREE.Vector3( gripWidth / 2, 0, 0));
+      const rigRightHand = pose.bar.clone().add(new THREE.Vector3(-gripWidth / 2, 0, 0));
+      const rigLeftElbow = j.rightShoulder.clone().lerp(rigLeftHand, 0.58).add(new THREE.Vector3( 0.06, -0.10, 0.08));
+      const rigRightElbow = j.leftShoulder.clone().lerp(rigRightHand, 0.58).add(new THREE.Vector3(-0.06, -0.10, 0.08));
+      chain.push(['LeftArm','LeftForeArm', rigLeftElbow], ['LeftForeArm','LeftHand', rigLeftHand]);
+      chain.push(['RightArm','RightForeArm', rigRightElbow], ['RightForeArm','RightHand', rigRightHand]);
     }
 
     for (const [boneName, childName, target] of chain) {
