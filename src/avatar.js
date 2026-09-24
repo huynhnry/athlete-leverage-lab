@@ -2,105 +2,73 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MODEL_URL } from './config.js';
 
-const TARGET_BONES = [
-  'Hips','Spine','Spine1','Spine2','Neck','Head',
-  'LeftShoulder','RightShoulder','LeftArm','RightArm','LeftForeArm','RightForeArm','LeftHand','RightHand',
-  'LeftUpLeg','RightUpLeg','LeftLeg','RightLeg','LeftFoot','RightFoot'
-];
+// CC0 Quaternius "Superhero Male" rig.
+// We map the source names into the canonical names used by the app so the
+// biomechanics layer stays independent of whichever visual mesh we use.
+const SOURCE_BONES = Object.freeze({
+  Hips: 'pelvis',
+  Spine: 'spine_01',
+  Spine1: 'spine_02',
+  Spine2: 'spine_03',
+  Neck: 'neck_01',
+  Head: 'Head',
 
-const cleanName = (name) => String(name || '')
-  .replace(/^mixamorig\d*[:_]?/i, '')
-  .replace(/^CC_Base_/i, '')
-  .replace(/[^a-z0-9]/gi, '')
-  .toLowerCase();
+  LeftShoulder: 'clavicle_l',
+  LeftArm: 'upperarm_l',
+  LeftForeArm: 'lowerarm_l',
+  LeftHand: 'hand_l',
 
-const canonicalLookup = new Map(TARGET_BONES.map((n) => [cleanName(n), n]));
+  RightShoulder: 'clavicle_r',
+  RightArm: 'upperarm_r',
+  RightForeArm: 'lowerarm_r',
+  RightHand: 'hand_r',
+
+  LeftUpLeg: 'thigh_l',
+  LeftLeg: 'calf_l',
+  LeftFoot: 'foot_l',
+
+  RightUpLeg: 'thigh_r',
+  RightLeg: 'calf_r',
+  RightFoot: 'foot_r',
+});
+
+const V = () => new THREE.Vector3();
+const Q = () => new THREE.Quaternion();
 
 function findBones(root) {
-  const out = new Map();
+  const bySource = new Map();
   root.traverse((node) => {
-    if (!node.isBone && !node.name) return;
-    const c = canonicalLookup.get(cleanName(node.name));
-    if (c && !out.has(c)) out.set(c, node);
+    if (node.isBone && node.name) bySource.set(node.name, node);
   });
+
+  const out = new Map();
+  for (const [canonical, source] of Object.entries(SOURCE_BONES)) {
+    const bone = bySource.get(source);
+    if (!bone) throw new Error(`Model is missing required bone: ${source}`);
+    out.set(canonical, bone);
+  }
   return out;
 }
 
-function captureRest(bones) {
-  const rest = new Map();
+function captureRest(root, bones) {
+  root.updateMatrixWorld(true);
+  const local = new Map();
+  const worldQ = new Map();
+
   for (const [name, bone] of bones) {
-    rest.set(name, {
+    local.set(name, {
       position: bone.position.clone(),
       quaternion: bone.quaternion.clone(),
       scale: bone.scale.clone(),
     });
+    worldQ.set(name, bone.getWorldQuaternion(Q()));
   }
-  return rest;
+  return { local, worldQ };
 }
 
-function applyAthleticMorphs(root) {
-  // Keep the base visually athletic and intentionally neutral/mannequin-like.
-  // We are validating kinematics first; realistic skin/face detail just makes
-  // rigging errors harder to read and much more uncanny.
-  const desired = {
-    bodyMasculine: 1.0,
-    bodyMuscular: 0.72,
-    chestPectorals: 0.62,
-    bustSmaller: 0.90,
-    bellyToned: 0.50,
-    armsMuscular: 0.58,
-    thighsMuscular: 0.58,
-    calvesMuscular: 0.46,
-    shouldersWider: 0.18,
-    hipsNarrower: 0.16,
-    gluteusBigger: 0.08,
-  };
-  const neutralMaterial = new THREE.MeshStandardMaterial({
-    color: 0x566474,
-    roughness: 0.76,
-    metalness: 0.0,
-  });
-
-  root.traverse((node) => {
-    if (!node.isMesh) return;
-
-    const n = String(node.name || '').toLowerCase();
-    // The parametric asset includes separate eyes/teeth/tongue meshes. They
-    // are irrelevant to biomechanics and were a big part of the uncanny look.
-    if (/eye|teeth|tongue/.test(n)) {
-      node.visible = false;
-      return;
-    }
-
-    node.material = neutralMaterial;
-    if (!node.morphTargetDictionary || !node.morphTargetInfluences) return;
-    for (const [name, weight] of Object.entries(desired)) {
-      const idx = node.morphTargetDictionary[name];
-      if (idx !== undefined) node.morphTargetInfluences[idx] = weight;
-    }
-  });
-}
-
-function childDistance(parent, child) {
-  parent.updateWorldMatrix(true, false);
-  child.updateWorldMatrix(true, false);
-  return parent.getWorldPosition(new THREE.Vector3()).distanceTo(child.getWorldPosition(new THREE.Vector3()));
-}
-
-function scaleOffset(rest, bones, childName, targetLength, parentName) {
-  const child = bones.get(childName);
-  const parent = bones.get(parentName);
-  if (!child || !parent) return;
-  const base = childDistance(parent, child);
-  if (base < 1e-5) return;
-  const r = targetLength / base;
-  const src = rest.get(childName)?.position;
-  if (src) child.position.copy(src).multiplyScalar(r);
-}
-
-function restoreRest(bones, rest) {
+function restoreLocal(bones, rest) {
   for (const [name, bone] of bones) {
-    const r = rest.get(name);
+    const r = rest.local.get(name);
     if (!r) continue;
     bone.position.copy(r.position);
     bone.quaternion.copy(r.quaternion);
@@ -108,73 +76,155 @@ function restoreRest(bones, rest) {
   }
 }
 
-function setLateralOffset(rest, bones, name, targetHalfWidth) {
-  const bone = bones.get(name);
-  const src = rest.get(name)?.position;
-  if (!bone || !src || !bone.parent) return;
-
-  // Bone offsets are authored in each parent's local frame, where local X is
-  // not guaranteed to mean body-left/right. Convert the rest offset into the
-  // world/armature frame, edit only the lateral component, then convert back.
-  bone.parent.updateWorldMatrix(true, false);
-  const parentQ = bone.parent.getWorldQuaternion(new THREE.Quaternion());
-  const worldOffset = src.clone().applyQuaternion(parentQ);
-  const fallbackSign = name.startsWith('Left') ? -1 : 1;
-  const sign = Math.sign(worldOffset.x) || fallbackSign;
-  worldOffset.x = sign * targetHalfWidth;
-  bone.position.copy(worldOffset.applyQuaternion(parentQ.clone().invert()));
+function worldPosition(bone) {
+  return bone.getWorldPosition(V());
 }
 
-function aimBoneAtWorld(bone, child, targetWorld) {
-  if (!bone || !child) return;
+function rotateToward(bone, child, targetWorld) {
+  if (!bone || !child || !targetWorld) return;
+
   bone.updateWorldMatrix(true, false);
   child.updateWorldMatrix(true, false);
 
-  const parentQuat = new THREE.Quaternion();
-  if (bone.parent) bone.parent.getWorldQuaternion(parentQuat);
-  else parentQuat.identity();
+  const origin = worldPosition(bone);
+  const from = worldPosition(child).sub(origin);
+  const to = targetWorld.clone().sub(origin);
+  if (from.lengthSq() < 1e-10 || to.lengthSq() < 1e-10) return;
 
-  const boneWorld = bone.getWorldPosition(new THREE.Vector3());
-  const desiredWorld = targetWorld.clone().sub(boneWorld);
-  if (desiredWorld.lengthSq() < 1e-10) return;
-  desiredWorld.normalize();
+  from.normalize();
+  to.normalize();
 
-  const desiredParent = desiredWorld.applyQuaternion(parentQuat.clone().invert()).normalize();
-  const childLocalDir = child.position.clone();
-  if (childLocalDir.lengthSq() < 1e-10) return;
-  childLocalDir.normalize();
+  // Robust world-space solve: rotate the CURRENT child direction onto the
+  // desired direction, then convert that world orientation back to bone-local.
+  // This avoids assumptions about bone axes/rest quaternions.
+  const delta = Q().setFromUnitVectors(from, to);
+  const world = bone.getWorldQuaternion(Q()).premultiply(delta);
+  const parentWorld = bone.parent
+    ? bone.parent.getWorldQuaternion(Q())
+    : Q().identity();
 
-  // Critical fix: preserve the authored bind/rest orientation. The previous
-  // implementation treated the child's local offset as though the bone's rest
-  // quaternion were identity, which twisted limbs across the body and pulled
-  // the hands into the face.
-  const restQ = bone.quaternion.clone();
-  const restAxisInParent = childLocalDir.clone().applyQuaternion(restQ).normalize();
-  const delta = new THREE.Quaternion().setFromUnitVectors(restAxisInParent, desiredParent);
-  bone.quaternion.copy(delta.multiply(restQ));
-  bone.updateWorldMatrix(true, true);
+  bone.quaternion.copy(parentWorld.invert().multiply(world));
+  bone.updateWorldMatrix(false, true);
+}
+
+function setBoneWorldPosition(bone, targetWorld) {
+  if (!bone?.parent) return;
+  bone.parent.updateWorldMatrix(true, false);
+  const local = bone.parent.worldToLocal(targetWorld.clone());
+  bone.position.copy(local);
+  bone.updateWorldMatrix(false, true);
+}
+
+function moveBoneByWorldDelta(bone, deltaWorld) {
+  if (!bone?.parent) return;
+  bone.parent.updateWorldMatrix(true, false);
+  const parentQ = bone.parent.getWorldQuaternion(Q());
+  const localDelta = deltaWorld.clone().applyQuaternion(parentQ.invert());
+  bone.position.add(localDelta);
+  bone.updateWorldMatrix(false, true);
+}
+
+function scaleLink(root, bones, childName, parentName, targetLength) {
+  const child = bones.get(childName);
+  const parent = bones.get(parentName);
+  if (!child || !parent) return;
+
+  root.updateMatrixWorld(true);
+  const current = worldPosition(parent).distanceTo(worldPosition(child));
+  if (current < 1e-6) return;
+
+  child.position.multiplyScalar(targetLength / current);
+  root.updateMatrixWorld(true);
+}
+
+function setHipWidth(root, bones, width) {
+  root.updateMatrixWorld(true);
+
+  // Source rig convention: anatomical Left is +X, Right is -X.
+  for (const [name, sign] of [['LeftUpLeg', 1], ['RightUpLeg', -1]]) {
+    const bone = bones.get(name);
+    const p = worldPosition(bone);
+    moveBoneByWorldDelta(bone, new THREE.Vector3(sign * width / 2 - p.x, 0, 0));
+  }
+  root.updateMatrixWorld(true);
+}
+
+function setShoulderWidth(root, bones, width) {
+  root.updateMatrixWorld(true);
+
+  // Move the clavicles so the humeral heads land at the requested biacromial
+  // width. This changes the whole arm location without scaling the humerus.
+  const pairs = [
+    ['LeftShoulder', 'LeftArm', 1],
+    ['RightShoulder', 'RightArm', -1],
+  ];
+
+  for (const [clavicleName, armName, sign] of pairs) {
+    const clavicle = bones.get(clavicleName);
+    const arm = bones.get(armName);
+    if (!clavicle || !arm) continue;
+    const p = worldPosition(arm);
+    moveBoneByWorldDelta(clavicle, new THREE.Vector3(sign * width / 2 - p.x, 0, 0));
+  }
+  root.updateMatrixWorld(true);
+}
+
+function setTorsoLength(root, bones, targetLength) {
+  const hips = bones.get('Hips');
+  const neck = bones.get('Neck');
+  if (!hips || !neck) return;
+
+  root.updateMatrixWorld(true);
+  const current = worldPosition(hips).distanceTo(worldPosition(neck));
+  if (current < 1e-6) return;
+
+  const ratio = targetLength / current;
+  for (const name of ['Spine', 'Spine1', 'Spine2', 'Neck']) {
+    const bone = bones.get(name);
+    if (bone) bone.position.multiplyScalar(ratio);
+  }
+  root.updateMatrixWorld(true);
 }
 
 function translateRigToHips(root, hips, target) {
   root.updateMatrixWorld(true);
-  const current = hips.getWorldPosition(new THREE.Vector3());
+  const current = worldPosition(hips);
   root.position.add(target.clone().sub(current));
   root.updateMatrixWorld(true);
 }
 
-function setTorsoChainTargets(j, bones) {
+function placeTorso(pose, bones) {
+  const j = pose.joints;
   const hips = bones.get('Hips');
   const spine = bones.get('Spine');
   const spine1 = bones.get('Spine1');
   const spine2 = bones.get('Spine2');
   const neck = bones.get('Neck');
-  if (!hips || !spine || !spine1 || !spine2) return;
+
+  if (!hips || !spine || !spine1 || !spine2 || !neck) return;
+
+  // Keep the pelvis level so moving the torso never drags both femurs with it.
+  // The first spine joint is translated along the desired torso line; the
+  // remaining segments rotate toward successive points on that same line.
   const line = j.shoulderCenter.clone().sub(j.hipCenter);
-  const targets = [0.24, 0.52, 0.78, 1.0].map((t) => j.hipCenter.clone().addScaledVector(line, t));
-  aimBoneAtWorld(hips, spine, targets[0]);
-  aimBoneAtWorld(spine, spine1, targets[1]);
-  aimBoneAtWorld(spine1, spine2, targets[2]);
-  if (neck) aimBoneAtWorld(spine2, neck, targets[3]);
+  const p1 = j.hipCenter.clone().addScaledVector(line, 0.22);
+  const p2 = j.hipCenter.clone().addScaledVector(line, 0.50);
+  const p3 = j.hipCenter.clone().addScaledVector(line, 0.78);
+  const p4 = j.shoulderCenter.clone();
+
+  setBoneWorldPosition(spine, p1);
+  rotateToward(spine, spine1, p2);
+  rotateToward(spine1, spine2, p3);
+  rotateToward(spine2, neck, p4);
+}
+
+function restoreWorldOrientation(bone, desiredWorldQ) {
+  if (!bone || !desiredWorldQ) return;
+  const parentWorld = bone.parent
+    ? bone.parent.getWorldQuaternion(Q())
+    : Q().identity();
+  bone.quaternion.copy(parentWorld.invert().multiply(desiredWorldQ));
+  bone.updateWorldMatrix(false, true);
 }
 
 export class AvatarRig {
@@ -183,6 +233,7 @@ export class AvatarRig {
     this.root = null;
     this.bones = null;
     this.rest = null;
+    this.measurementPose = null;
     this.ready = false;
     this.lastMeasurements = null;
   }
@@ -190,20 +241,25 @@ export class AvatarRig {
   async load() {
     const loader = new GLTFLoader();
     const gltf = await loader.loadAsync(MODEL_URL);
+
     this.root = gltf.scene;
     this.root.traverse((node) => {
-      if (node.isMesh) {
-        node.castShadow = true;
-        node.receiveShadow = true;
-        if (node.material) {
-          node.material.roughness = Math.max(0.52, node.material.roughness ?? 0.6);
-          node.material.metalness = 0;
-        }
-      }
+      if (!node.isMesh) return;
+      node.castShadow = true;
+      node.receiveShadow = true;
+      node.frustumCulled = false;
+
+      // Keep this as a clean biomechanics mannequin. The source is already an
+      // athletic male mesh; one matte material keeps attention on movement.
+      node.material = new THREE.MeshStandardMaterial({
+        color: 0x667789,
+        roughness: 0.72,
+        metalness: 0.02,
+      });
     });
+
     this.bones = findBones(this.root);
-    this.rest = captureRest(this.bones);
-    applyAthleticMorphs(this.root);
+    this.rest = captureRest(this.root, this.bones);
     this.scene.add(this.root);
     this.ready = true;
     return this;
@@ -211,97 +267,120 @@ export class AvatarRig {
 
   applyMeasurements(m) {
     if (!this.ready) return;
-    restoreRest(this.bones, this.rest);
+
+    restoreLocal(this.bones, this.rest);
     this.root.position.set(0, 0, 0);
-    this.root.rotation.set(0, 0, 0);
+    this.root.quaternion.identity();
     this.root.scale.setScalar(1);
     this.root.updateMatrixWorld(true);
 
-    scaleOffset(this.rest, this.bones, 'LeftLeg', m.femur, 'LeftUpLeg');
-    scaleOffset(this.rest, this.bones, 'RightLeg', m.femur, 'RightUpLeg');
-    this.root.updateMatrixWorld(true);
-    scaleOffset(this.rest, this.bones, 'LeftFoot', m.tibia, 'LeftLeg');
-    scaleOffset(this.rest, this.bones, 'RightFoot', m.tibia, 'RightLeg');
-    this.root.updateMatrixWorld(true);
-    scaleOffset(this.rest, this.bones, 'LeftForeArm', m.upperArm, 'LeftArm');
-    scaleOffset(this.rest, this.bones, 'RightForeArm', m.upperArm, 'RightArm');
-    this.root.updateMatrixWorld(true);
-    scaleOffset(this.rest, this.bones, 'LeftHand', m.forearm, 'LeftForeArm');
-    scaleOffset(this.rest, this.bones, 'RightHand', m.forearm, 'RightForeArm');
+    setTorsoLength(this.root, this.bones, m.torso);
+    setHipWidth(this.root, this.bones, m.hipWidth);
+    setShoulderWidth(this.root, this.bones, m.shoulderWidth);
 
-    setLateralOffset(this.rest, this.bones, 'LeftUpLeg', m.hipWidth / 2);
-    setLateralOffset(this.rest, this.bones, 'RightUpLeg', m.hipWidth / 2);
+    scaleLink(this.root, this.bones, 'LeftLeg', 'LeftUpLeg', m.femur);
+    scaleLink(this.root, this.bones, 'RightLeg', 'RightUpLeg', m.femur);
+    scaleLink(this.root, this.bones, 'LeftFoot', 'LeftLeg', m.tibia);
+    scaleLink(this.root, this.bones, 'RightFoot', 'RightLeg', m.tibia);
 
-    const leftShoulder = this.bones.get('LeftShoulder') || this.bones.get('LeftArm');
-    const rightShoulder = this.bones.get('RightShoulder') || this.bones.get('RightArm');
-    if (leftShoulder && rightShoulder) {
-      const lsrc = this.rest.get(this.bones.has('LeftShoulder') ? 'LeftShoulder' : 'LeftArm')?.position;
-      const rsrc = this.rest.get(this.bones.has('RightShoulder') ? 'RightShoulder' : 'RightArm')?.position;
-      if (lsrc && rsrc) {
-        leftShoulder.position.copy(lsrc); rightShoulder.position.copy(rsrc);
-        leftShoulder.position.x = -m.shoulderWidth / 2;
-        rightShoulder.position.x = m.shoulderWidth / 2;
-      }
-    }
+    scaleLink(this.root, this.bones, 'LeftForeArm', 'LeftArm', m.upperArm);
+    scaleLink(this.root, this.bones, 'RightForeArm', 'RightArm', m.upperArm);
+    scaleLink(this.root, this.bones, 'LeftHand', 'LeftForeArm', m.forearm);
+    scaleLink(this.root, this.bones, 'RightHand', 'RightForeArm', m.forearm);
 
-    // Torso length: distribute a single ratio over the authored spine offsets.
-    const torsoBones = ['Spine', 'Spine1', 'Spine2'];
-    const spineNodes = torsoBones.map((n) => this.bones.get(n)).filter(Boolean);
-    if (spineNodes.length) {
-      this.root.updateMatrixWorld(true);
-      const hips = this.bones.get('Hips');
-      const top = this.bones.get('Neck') || this.bones.get('Spine2');
-      const base = hips && top ? childDistance(hips, top) : 0;
-      const ratio = base > 1e-5 ? m.torso / base : 1;
-      for (const name of torsoBones) {
-        const node = this.bones.get(name); const src = this.rest.get(name)?.position;
-        if (node && src) node.position.copy(src).multiplyScalar(ratio);
-      }
-    }
     this.root.updateMatrixWorld(true);
+
+    // Capture the measurement-adjusted neutral locals. Every animation frame
+    // resets to THIS state, not to the original asset proportions.
+    this.measurementPose = captureRest(this.root, this.bones);
     this.lastMeasurements = m;
   }
 
+  resetFrame() {
+    if (!this.measurementPose) return;
+    restoreLocal(this.bones, this.measurementPose);
+    this.root.position.set(0, 0, 0);
+    this.root.quaternion.identity();
+    this.root.updateMatrixWorld(true);
+  }
+
   pose(pose) {
-    if (!this.ready) return;
+    if (!this.ready || !this.measurementPose) return;
+
     const j = pose.joints;
     const hips = this.bones.get('Hips');
-    if (!hips) return;
 
-    // Restore rotations only; keep measurement-adjusted bone offsets.
-    for (const [name, bone] of this.bones) {
-      const r = this.rest.get(name);
-      if (r) bone.quaternion.copy(r.quaternion);
-    }
-    this.root.position.set(0, 0, 0);
-    this.root.rotation.set(0, 0, 0);
-    this.root.updateMatrixWorld(true);
+    this.resetFrame();
     translateRigToHips(this.root, hips, j.hipCenter);
-    setTorsoChainTargets(j, this.bones);
+    placeTorso(pose, this.bones);
 
-    const chain = [
-      ['LeftUpLeg','LeftLeg', j.leftKnee], ['LeftLeg','LeftFoot', j.leftAnkle],
-      ['RightUpLeg','RightLeg', j.rightKnee], ['RightLeg','RightFoot', j.rightAnkle],
+    // Source rig uses anatomical Left=+X and Right=-X. Our solver names
+    // world -X "left" and world +X "right", so map them explicitly.
+    const legTargets = [
+      ['LeftUpLeg', 'LeftLeg', j.rightKnee],
+      ['LeftLeg', 'LeftFoot', j.rightAnkle],
+      ['RightUpLeg', 'RightLeg', j.leftKnee],
+      ['RightLeg', 'RightFoot', j.leftAnkle],
     ];
-    if (j.leftElbow && j.leftHand) {
-      chain.push(['LeftArm','LeftForeArm', j.leftElbow], ['LeftForeArm','LeftHand', j.leftHand]);
-      chain.push(['RightArm','RightForeArm', j.rightElbow], ['RightForeArm','RightHand', j.rightHand]);
-    } else {
-      // Squat rack grip: hands actually sit on the bar instead of floating in
-      // front of the face. This is still a generic symmetric rack grip; a user
-      // grip-width control can come after the base pose is visually validated.
-      const gripWidth = Math.max(0.72, (this.lastMeasurements?.shoulderWidth || 0.46) * 1.65);
-      const lHand = pose.bar.clone().add(new THREE.Vector3(-gripWidth / 2, 0, 0));
-      const rHand = pose.bar.clone().add(new THREE.Vector3( gripWidth / 2, 0, 0));
-      const lElbow = j.leftShoulder.clone().lerp(lHand, 0.58).add(new THREE.Vector3(-0.06, -0.10, 0.08));
-      const rElbow = j.rightShoulder.clone().lerp(rHand, 0.58).add(new THREE.Vector3( 0.06, -0.10, 0.08));
-      chain.push(['LeftArm','LeftForeArm', lElbow], ['LeftForeArm','LeftHand', lHand]);
-      chain.push(['RightArm','RightForeArm', rElbow], ['RightForeArm','RightHand', rHand]);
+
+    for (const [boneName, childName, target] of legTargets) {
+      rotateToward(this.bones.get(boneName), this.bones.get(childName), target);
     }
 
-    for (const [boneName, childName, target] of chain) {
-      aimBoneAtWorld(this.bones.get(boneName), this.bones.get(childName), target);
+    // Keep feet flat/neutral instead of inheriting the full calf rotation.
+    restoreWorldOrientation(
+      this.bones.get('LeftFoot'),
+      this.measurementPose.worldQ.get('LeftFoot'),
+    );
+    restoreWorldOrientation(
+      this.bones.get('RightFoot'),
+      this.measurementPose.worldQ.get('RightFoot'),
+    );
+
+    let rigLeftElbow;
+    let rigRightElbow;
+    let rigLeftHand;
+    let rigRightHand;
+
+    if (j.leftElbow && j.leftHand) {
+      // Bench/deadlift already provide solved elbow + hand targets.
+      rigLeftElbow = j.rightElbow;
+      rigLeftHand = j.rightHand;
+      rigRightElbow = j.leftElbow;
+      rigRightHand = j.leftHand;
+    } else {
+      // Squat rack position: hands are constrained to the bar shaft.
+      const shoulderWidth = this.lastMeasurements?.shoulderWidth || 0.46;
+      const gripWidth = Math.max(0.72, shoulderWidth * 1.65);
+
+      rigLeftHand = pose.bar.clone().add(new THREE.Vector3(gripWidth / 2, 0, 0));
+      rigRightHand = pose.bar.clone().add(new THREE.Vector3(-gripWidth / 2, 0, 0));
+
+      const rigLeftShoulder = j.rightShoulder;
+      const rigRightShoulder = j.leftShoulder;
+
+      rigLeftElbow = rigLeftShoulder
+        .clone()
+        .lerp(rigLeftHand, 0.55)
+        .add(new THREE.Vector3(0.07, -0.10, 0.10));
+
+      rigRightElbow = rigRightShoulder
+        .clone()
+        .lerp(rigRightHand, 0.55)
+        .add(new THREE.Vector3(-0.07, -0.10, 0.10));
     }
+
+    const armTargets = [
+      ['LeftArm', 'LeftForeArm', rigLeftElbow],
+      ['LeftForeArm', 'LeftHand', rigLeftHand],
+      ['RightArm', 'RightForeArm', rigRightElbow],
+      ['RightForeArm', 'RightHand', rigRightHand],
+    ];
+
+    for (const [boneName, childName, target] of armTargets) {
+      rotateToward(this.bones.get(boneName), this.bones.get(childName), target);
+    }
+
     this.root.updateMatrixWorld(true);
   }
 }

@@ -31,4 +31,4 @@ Expected site URL:
 
 ## 3D model
 
-The browser loads the CC0 MakeHuman/MPFB2-based parametric base from `nirholas/three.ws`, pinned to commit `482a12381caeb4122e2444cf8727a476f2c4dfc2`. The source model provides a Mixamo-style rig and body morph targets.
+The browser loads the CC0 Quaternius **Superhero Male** rig packaged by `programasweights/avatar`, pinned to commit `d5c4a204c6485ebd7d1d0ced6f1e261509874af5`. The asset keeps its full skeleton and skin weights and is used as a neutral athletic biomechanics mannequin.
