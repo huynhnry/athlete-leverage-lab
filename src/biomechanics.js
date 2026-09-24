@@ -40,10 +40,21 @@ function inactiveDemands() {
   };
 }
 
-function armIK(shoulder, hand, upperArm, forearm, side, elbowFlare = 0.75) {
+function armIK(shoulder, hand, upperArm, forearm, side, options = {}) {
   const outward = side === 'left' ? -1 : 1;
-  const bend = v(outward * elbowFlare, -0.15, 0.7);
+  const {
+    lateral = 0.75,
+    vertical = -0.15,
+    sagittal = 0.7,
+  } = options;
+  const bend = v(outward * lateral, vertical, sagittal);
   return solveTwoLink3D(shoulder, hand, upperArm, forearm, bend);
+}
+
+function straightArmElbow(shoulder, hand, upperArm) {
+  const direction = hand.clone().sub(shoulder);
+  if (direction.lengthSq() < 1e-10) return shoulder.clone();
+  return shoulder.clone().add(direction.normalize().multiplyScalar(upperArm));
 }
 
 function squatLean(m, style, stanceMult) {
@@ -116,8 +127,16 @@ function squatPose(m, style, stanceMult, progress) {
     rightHand: v(squatGrip / 2, barY - 0.015, barZ + 0.035),
   };
   const elbows = {
-    leftElbow: armIK(sides.leftShoulder, hands.leftHand, m.upperArm, m.forearm, 'left', 0.62),
-    rightElbow: armIK(sides.rightShoulder, hands.rightHand, m.upperArm, m.forearm, 'right', 0.62),
+    leftElbow: armIK(sides.leftShoulder, hands.leftHand, m.upperArm, m.forearm, 'left', {
+      lateral: 0.85,
+      vertical: -1.15,
+      sagittal: 0.18,
+    }),
+    rightElbow: armIK(sides.rightShoulder, hands.rightHand, m.upperArm, m.forearm, 'right', {
+      lateral: 0.85,
+      vertical: -1.15,
+      sagittal: 0.18,
+    }),
   };
 
   const bar = v(0, barY, barZ);
@@ -165,10 +184,10 @@ function squatPose(m, style, stanceMult, progress) {
 function deadliftGripWidth(m, stanceWidth) {
   const ratio = stanceWidth / m.hipWidth;
   if (ratio < 1.35) return Math.max(m.shoulderWidth * 1.02, stanceWidth + 0.12);
-  if (ratio > 1.6) return Math.max(0.34, Math.min(m.shoulderWidth * 0.9, stanceWidth - 0.16));
+  if (ratio > 1.6) return Math.max(0.30, Math.min(0.38, m.shoulderWidth * 0.82, stanceWidth - 0.22));
   const t = (ratio - 1.35) / 0.25;
   const outside = Math.max(m.shoulderWidth * 1.02, stanceWidth + 0.12);
-  const inside = Math.max(0.34, Math.min(m.shoulderWidth * 0.9, stanceWidth - 0.16));
+  const inside = Math.max(0.30, Math.min(0.38, m.shoulderWidth * 0.82, stanceWidth - 0.22));
   return lerp(outside, inside, t);
 }
 
@@ -208,8 +227,10 @@ function deadliftPose(m, stanceMult, progress) {
     rightHand: v(gripWidth / 2, barY + 0.035, barZ),
   };
   const elbows = {
-    leftElbow: armIK(sides.leftShoulder, hands.leftHand, m.upperArm, m.forearm, 'left', 0.15),
-    rightElbow: armIK(sides.rightShoulder, hands.rightHand, m.upperArm, m.forearm, 'right', 0.15),
+    // Deadlift elbows should not bend. Build the elbow directly on the
+    // shoulder→wrist line at the measured humerus length.
+    leftElbow: straightArmElbow(sides.leftShoulder, hands.leftHand, m.upperArm),
+    rightElbow: straightArmElbow(sides.rightShoulder, hands.rightHand, m.upperArm),
   };
   const bar = v(0, barY, barZ);
   const barForce = m.barMass * G;
@@ -277,8 +298,18 @@ function benchPose(m, gripMult, progress) {
     rightHand: v(gripWidth / 2, barY + 0.025, barZ - 0.035),
   };
   const elbows = {
-    leftElbow: armIK(sides.leftShoulder, hands.leftHand, m.upperArm, m.forearm, 'left', 0.95),
-    rightElbow: armIK(sides.rightShoulder, hands.rightHand, m.upperArm, m.forearm, 'right', 0.95),
+    // Bench elbows bend below the bar and slightly toward the feet, rather
+    // than choosing the mirrored/backwards solution of the two-link arm.
+    leftElbow: armIK(sides.leftShoulder, hands.leftHand, m.upperArm, m.forearm, 'left', {
+      lateral: 1.15,
+      vertical: -1.0,
+      sagittal: 0.42,
+    }),
+    rightElbow: armIK(sides.rightShoulder, hands.rightHand, m.upperArm, m.forearm, 'right', {
+      lateral: 1.15,
+      vertical: -1.0,
+      sagittal: 0.42,
+    }),
   };
 
   const footWidth = Math.max(m.hipWidth * 1.25, 0.42);
