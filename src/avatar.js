@@ -323,59 +323,34 @@ function classifyMuscleVertex(mesh, vertexIndex, position, skinIndex, skinWeight
   return MUSCLE.none;
 }
 
-function captureHandCalibration(sourceBones, side) {
-  const suffix = side === 'left' ? 'l' : 'r';
-  const hand = sourceBones.get(`hand_${suffix}`);
-  const middle = sourceBones.get(`middle_01_${suffix}`);
-  const index = sourceBones.get(`index_01_${suffix}`);
-  const pinky = sourceBones.get(`pinky_01_${suffix}`);
-  if (!hand || !middle || !index || !pinky) return null;
-
-  hand.updateWorldMatrix(true, true);
-  const handPos = worldPosition(hand);
-  const fingerWorld = worldPosition(middle).sub(handPos).normalize();
-  const acrossWorld = worldPosition(index).sub(worldPosition(pinky));
-  acrossWorld.addScaledVector(fingerWorld, -acrossWorld.dot(fingerWorld));
-  if (acrossWorld.lengthSq() < 1e-10) return null;
-  acrossWorld.normalize();
-
-  const normalWorld = acrossWorld.clone().cross(fingerWorld).normalize();
-  const invHand = hand.getWorldQuaternion(Q()).invert();
-
-  const acrossLocal = acrossWorld.clone().applyQuaternion(invHand).normalize();
-  const fingerLocal = fingerWorld.clone().applyQuaternion(invHand).normalize();
-  const normalLocal = normalWorld.clone().applyQuaternion(invHand).normalize();
-
-  const localBasisQ = Q().setFromRotationMatrix(
-    new THREE.Matrix4().makeBasis(acrossLocal, fingerLocal, normalLocal),
-  );
-
-  return {
-    localBasisQ,
-    acrossSign: Math.sign(acrossWorld.x) || (side === 'left' ? 1 : -1),
-  };
-}
-
-function orientHandToBar(hand, calibration, barCenter) {
-  if (!hand || !calibration || !barCenter) return;
+function orientHandToBar(hand, side, barCenter) {
+  if (!hand || !barCenter) return;
 
   hand.updateWorldMatrix(true, true);
   const wrist = worldPosition(hand);
-  const fingerTarget = barCenter.clone().sub(wrist);
-  if (fingerTarget.lengthSq() < 1e-10) return;
-  fingerTarget.normalize();
+  const fingerDir = barCenter.clone().sub(wrist);
+  if (fingerDir.lengthSq() < 1e-10) return;
+  fingerDir.normalize();
 
-  let acrossTarget = new THREE.Vector3(calibration.acrossSign, 0, 0);
-  acrossTarget.addScaledVector(fingerTarget, -acrossTarget.dot(fingerTarget));
-  if (acrossTarget.lengthSq() < 1e-10) acrossTarget = new THREE.Vector3(1, 0, 0);
-  acrossTarget.normalize();
+  // This GLB's hand axes are stable and known:
+  //   +Y = wrist -> fingers
+  //   +Z = pinky -> index
+  //   +X = palm-normal axis
+  // Map +Y directly toward the shaft and +Z along the shaft toward the index
+  // side. This gives the two hands a true mirrored frame instead of trying to
+  // infer roll from already-posed finger bones every frame.
+  let zAxis = new THREE.Vector3(side === 'left' ? -1 : 1, 0, 0);
+  zAxis.addScaledVector(fingerDir, -zAxis.dot(fingerDir));
+  if (zAxis.lengthSq() < 1e-10) zAxis.set(side === 'left' ? -1 : 1, 0, 0);
+  zAxis.normalize();
 
-  const normalTarget = acrossTarget.clone().cross(fingerTarget).normalize();
-  const targetBasisQ = Q().setFromRotationMatrix(
-    new THREE.Matrix4().makeBasis(acrossTarget, fingerTarget, normalTarget),
+  const xAxis = fingerDir.clone().cross(zAxis).normalize();
+  zAxis = xAxis.clone().cross(fingerDir).normalize();
+
+  const desiredWorldQ = Q().setFromRotationMatrix(
+    new THREE.Matrix4().makeBasis(xAxis, fingerDir, zAxis),
   );
 
-  const desiredWorldQ = targetBasisQ.multiply(calibration.localBasisQ.clone().invert());
   const parentWorldQ = hand.parent
     ? hand.parent.getWorldQuaternion(Q())
     : Q().identity();
@@ -384,72 +359,35 @@ function orientHandToBar(hand, calibration, barCenter) {
   hand.updateWorldMatrix(false, true);
 }
 
-function fingerBasis(sourceBones, side, bone) {
-  const suffix = side === 'left' ? 'l' : 'r';
-  const wrist = sourceBones.get(`hand_${suffix}`);
-  const middle = sourceBones.get(`middle_01_${suffix}`);
-  const index = sourceBones.get(`index_01_${suffix}`);
-  const pinky = sourceBones.get(`pinky_01_${suffix}`);
-  const end = bone?.children?.find((child) => child.isBone);
-
-  if (!wrist || !middle || !index || !pinky || !end) return null;
-
-  const position = (b) => b.getWorldPosition(V());
-  const along = position(middle).sub(position(wrist)).normalize();
-  const across = position(index).sub(position(pinky)).normalize();
-  const normal = along
-    .clone()
-    .cross(across)
-    .normalize()
-    .multiplyScalar(side === 'left' ? 1 : -1);
-
-  const y = position(end).sub(position(bone)).normalize();
-  const z = y
-    .clone()
-    .cross(normal)
-    .normalize()
-    .multiplyScalar(side === 'left' ? 1 : -1);
-  const x = y.clone().cross(z).normalize();
-
-  const inverse = bone.getWorldQuaternion(Q()).invert();
-  return new THREE.Quaternion().setFromRotationMatrix(
-    new THREE.Matrix4().makeBasis(
-      x.applyQuaternion(inverse),
-      y.applyQuaternion(inverse),
-      z.applyQuaternion(inverse),
-    ),
-  );
-}
-
-function curlFinger(sourceBones, side, finger, angles) {
+function curlGripFinger(sourceBones, side, finger, angles) {
   const suffix = side === 'left' ? 'l' : 'r';
 
   for (let segment = 1; segment <= 3; segment++) {
     const bone = sourceBones.get(`${finger}_0${segment}_${suffix}`);
     if (!bone) continue;
 
-    bone.updateWorldMatrix(true, true);
-    const basis = fingerBasis(sourceBones, side, bone);
-    if (!basis) continue;
-
-    const delta = Q().setFromEuler(
-      new THREE.Euler(0, 0, THREE.MathUtils.degToRad(angles[segment - 1]), 'XYZ'),
+    // Finger child offsets run along local +Y. In this asset the mirrored
+    // finger roots make the SAME local +X flexion produce anatomically mirrored
+    // curls, so there is deliberately no left/right sign hack here.
+    const delta = Q().setFromAxisAngle(
+      new THREE.Vector3(1, 0, 0),
+      THREE.MathUtils.degToRad(angles[segment - 1]),
     );
-    bone.quaternion.multiply(
-      basis.clone().multiply(delta).multiply(basis.clone().invert()),
-    );
+    bone.quaternion.multiply(delta);
     bone.updateWorldMatrix(false, true);
   }
 }
 
 function applyBarGrip(sourceBones) {
-  // A straight-finger T-pose hand looks wildly wrong even when the wrist
-  // actually reaches the shaft. Curl the fingers into a neutral closed grip.
+  // Keep the grip conservative. The previous dynamic curl basis could invert a
+  // hand and made the right fingers fold backward. These fixed local flexions
+  // are deterministic and mirrored by the source skeleton itself.
   for (const side of ['left', 'right']) {
     for (const finger of ['index', 'middle', 'ring', 'pinky']) {
-      curlFinger(sourceBones, side, finger, [46, 62, 42]);
+      curlGripFinger(sourceBones, side, finger, [24, 38, 28]);
     }
-    curlFinger(sourceBones, side, 'thumb', [18, 26, 20]);
+    // Leave the thumb in its authored neutral pose for now. A bad thumb pose is
+    // much more visually destructive than a slightly open thumb.
   }
 }
 
@@ -502,7 +440,6 @@ export class AvatarRig {
     this.restAll = null;
     this.measurementPose = null;
     this.measurementPoseAll = null;
-    this.handCalibration = null;
     this.ready = false;
     this.lastMeasurements = null;
     this.heatMeshes = [];
@@ -526,10 +463,6 @@ export class AvatarRig {
     this.bones = findBones(this.root, this.sourceBones);
     this.restAll = captureRest(this.root, this.sourceBones);
     this.rest = captureRest(this.root, this.bones);
-    this.handCalibration = {
-      left: captureHandCalibration(this.sourceBones, 'left'),
-      right: captureHandCalibration(this.sourceBones, 'right'),
-    };
     this.scene.add(this.root);
     this.heatMeshes = prepareHeatmap(this.root);
     this.ready = true;
@@ -650,12 +583,12 @@ export class AvatarRig {
     if (rigLeftHandBone) {
       const contact = pose.bar.clone();
       contact.x = worldPosition(rigLeftHandBone).x;
-      orientHandToBar(rigLeftHandBone, this.handCalibration.left, contact);
+      orientHandToBar(rigLeftHandBone, 'left', contact);
     }
     if (rigRightHandBone) {
       const contact = pose.bar.clone();
       contact.x = worldPosition(rigRightHandBone).x;
-      orientHandToBar(rigRightHandBone, this.handCalibration.right, contact);
+      orientHandToBar(rigRightHandBone, 'right', contact);
     }
 
     this.root.updateMatrixWorld(true);
