@@ -121,10 +121,11 @@ function squatPose(m, style, stanceMult, progress) {
   // on the shaft.
   const squatGrip = Math.max(m.shoulderWidth * 1.55, m.shoulderWidth + 0.22);
   const hands = {
-    // "Hand" here is the wrist joint target. Offset it slightly forward/down
-    // from the shaft center so the bar sits in the palm instead of through the wrist mesh.
-    leftHand: v(-squatGrip / 2, barY - 0.015, barZ + 0.035),
-    rightHand: v(squatGrip / 2, barY - 0.015, barZ + 0.035),
+    // These are WRIST targets, not bar-contact points. The source mesh has
+    // ~9–11 cm from wrist to finger bases, so the wrist must sit a real
+    // palm-length away from the shaft or the hand geometry passes through it.
+    leftHand: v(-squatGrip / 2, barY - 0.052, barZ + 0.068),
+    rightHand: v(squatGrip / 2, barY - 0.052, barZ + 0.068),
   };
   const elbows = {
     leftElbow: armIK(sides.leftShoulder, hands.leftHand, m.upperArm, m.forearm, 'left', {
@@ -208,7 +209,7 @@ function deadliftPose(m, stanceMult, progress) {
   // shaft share the body's center plane.
   const barZ = 0.19;
   const barYBottom = 0.225;
-  const wristYOffset = 0.035;
+  const wristYOffset = 0.086;
 
   const dxArm = Math.abs(m.shoulderWidth - gripWidth) / 2;
 
@@ -366,10 +367,10 @@ function benchPose(m, gripMult, progress) {
   const barY = lerp(touchY, lockY, s);
   const barZ = lerp(touchZ, lockZ, s);
   const hands = {
-    // Bench wrist target is slightly above and toward the shoulder from the shaft.
-    // This puts the bar across the palm rather than through the wrist joint.
-    leftHand: v(-gripWidth / 2, barY + 0.025, barZ - 0.035),
-    rightHand: v(gripWidth / 2, barY + 0.025, barZ - 0.035),
+    // Wrist is below the bar by roughly a palm length. The old +Y offset put
+    // the wrist above the shaft and forced the fingers to fold backward.
+    leftHand: v(-gripWidth / 2, barY - 0.078, barZ - 0.018),
+    rightHand: v(gripWidth / 2, barY - 0.078, barZ - 0.018),
   };
   const elbows = {
     // Bench elbows bend below the bar and slightly toward the feet, rather
